@@ -160,14 +160,15 @@ it("preserves interpreter and Windows argument boundaries while unpacking asar p
   expect(bundledMcpCommand()?.args[0]).toMatch(/mcp[/\\]dist[/\\]index\.js$/);
 });
 
-it.each([false, true])(
-  "bounds probes whose descendants retain pipes (parent exits: %s)",
-  async (parentExits) => {
+it.each(["running", "exited", "success"])(
+  "reaps probe descendants (parent: %s)",
+  async (mode) => {
     const f =
       await fixture(`import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs';
-    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio:['ignore',1,2]});
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio:${mode === "success" ? "'ignore'" : "['ignore',1,2]"}});
     writeFileSync(new URL('../child-pid', import.meta.url), String(child.pid));
-    ${parentExits ? "process.exit(0)" : "setInterval(() => {}, 1000)"};`);
+    ${mode === "success" ? `console.log(${JSON.stringify(JSON.stringify(descriptor))})` : ""};
+    ${mode === "running" ? "setInterval(() => {}, 1000)" : "process.exit(0)"};`);
     let pid: number | undefined;
     try {
       const result = await Promise.race([
@@ -179,7 +180,7 @@ it.each([false, true])(
           ),
         ),
       ]);
-      expect(result.kind).toBe("unavailable");
+      expect(result.kind).toBe(mode === "success" ? "verified" : "unavailable");
       pid = Number(await readFile(join(f.root, "child-pid"), "utf8"));
       await vi.waitFor(
         async () => {

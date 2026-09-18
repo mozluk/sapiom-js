@@ -60,15 +60,18 @@ function probeEnvironment(launch: McpDevServerCommand): NodeJS.ProcessEnv {
   return env;
 }
 
-// Keep an owned leader alive while a broken probe's descendants retain pipes.
-// Same pipe-lifetime pattern as Desktop's bounded installer, scoped to this probe.
+// Keep an owned leader alive until the host reaps the tree, even on success.
+// A separate bounded result channel avoids relying on descendant pipe lifetime.
 const PROBE_RUNNER = `
 const {spawn} = require('node:child_process');
+process.on('message', () => {});
+const chunks = []; let bytes = 0; let sent = false;
+const report = output => { if (!sent) { sent = true; process.send({output}); } };
 const child = spawn(process.execPath, process.argv.slice(1), {stdio:['ignore','pipe','pipe'], windowsHide:true});
-child.stdout.pipe(process.stdout, {end:false});
-child.stderr.pipe(process.stderr, {end:false});
-child.on('error', () => { process.exitCode = 1; });
-child.on('close', code => { process.exitCode = code ?? 1; });
+child.stdout.on('data', chunk => { bytes += chunk.length; if (bytes > ${HOST_MESSAGE_MAX_BYTES}) report(null); else chunks.push(chunk); });
+child.stderr.on('data', () => report(null));
+child.on('error', () => report(null));
+child.on('close', code => report(code === 0 ? Buffer.concat(chunks).toString('utf8') : null));
 `;
 
 function runProbe(
@@ -87,21 +90,15 @@ function runProbe(
           env: probeEnvironment(launch),
           windowsHide: true,
           detached: process.platform !== "win32",
-          stdio: ["ignore", "pipe", "pipe"],
+          stdio: ["ignore", "ignore", "ignore", "ipc"],
         },
       );
     } catch {
       done(null);
       return;
     }
-    const chunks: Buffer[] = [];
-    let bytes = 0;
     let stopping = false;
-    const finish = (output: string | null) => {
-      clearTimeout(timer);
-      done(output);
-    };
-    const stop = async () => {
+    const stop = async (output: string | null = null) => {
       if (stopping) return;
       stopping = true;
       if (child.pid && child.exitCode === null && child.signalCode === null) {
@@ -128,28 +125,27 @@ function runProbe(
         }
         child.kill("SIGKILL");
       }
-      // A separate deadline owns completion, even if a descendant retains pipes.
-      child.stdout?.destroy();
-      child.stderr?.destroy();
-      finish(null);
+      if (child.connected) child.disconnect();
+      clearTimeout(timer);
+      done(output);
     };
     const timer = setTimeout(() => {
       void stop();
     }, timeoutMs);
-    child.stdout!.on("data", (chunk: Buffer) => {
-      bytes += chunk.length;
-      if (bytes > HOST_MESSAGE_MAX_BYTES) void stop();
-      else chunks.push(chunk);
-    });
-    child.stderr!.on("data", () => {
-      void stop();
+    child.once("message", (message) => {
+      const output = (message as { output?: unknown })?.output;
+      void stop(
+        typeof output === "string" &&
+          Buffer.byteLength(output) <= HOST_MESSAGE_MAX_BYTES
+          ? output
+          : null,
+      );
     });
     child.once("error", () => {
       void stop();
     });
-    child.once("close", (code) => {
-      if (!stopping)
-        finish(code === 0 ? Buffer.concat(chunks).toString("utf8") : null);
+    child.once("close", () => {
+      void stop();
     });
   });
 }
