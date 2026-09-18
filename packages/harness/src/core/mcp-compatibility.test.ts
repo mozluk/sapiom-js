@@ -96,7 +96,14 @@ it("kills the direct probe process on timeout", async () => {
     writeFileSync(new URL('../pid', import.meta.url), String(process.pid)); setInterval(() => {}, 1000);`);
   expect((await qualifyMcpCommand(f.command, 300)).kind).toBe("unavailable");
   const pid = Number(await readFile(join(f.root, "pid"), "utf8"));
-  expect(() => process.kill(pid, 0)).toThrow();
+  await vi.waitFor(async () => {
+    if (process.platform === "linux") {
+      const status = await readFile(`/proc/${pid}/status`, "utf8").catch(
+        () => "State:\tZ",
+      );
+      expect(status).toMatch(/State:\s+Z/);
+    } else expect(() => process.kill(pid, 0)).toThrow();
+  });
 });
 
 it("rejects an executable that changes during its probe", async () => {
@@ -152,3 +159,50 @@ it("preserves interpreter and Windows argument boundaries while unpacking asar p
   });
   expect(bundledMcpCommand()?.args[0]).toMatch(/mcp[/\\]dist[/\\]index\.js$/);
 });
+
+it.each([false, true])(
+  "bounds probes whose descendants retain pipes (parent exits: %s)",
+  async (parentExits) => {
+    const f =
+      await fixture(`import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs';
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio:['ignore',1,2]});
+    writeFileSync(new URL('../child-pid', import.meta.url), String(child.pid));
+    ${parentExits ? "process.exit(0)" : "setInterval(() => {}, 1000)"};`);
+    let pid: number | undefined;
+    try {
+      const result = await Promise.race([
+        qualifyMcpCommand(f.command, 400),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("preflight exceeded deadline")),
+            2_000,
+          ),
+        ),
+      ]);
+      expect(result.kind).toBe("unavailable");
+      pid = Number(await readFile(join(f.root, "child-pid"), "utf8"));
+      await vi.waitFor(
+        async () => {
+          if (process.platform === "linux") {
+            const status = await readFile(`/proc/${pid}/status`, "utf8").catch(
+              () => "State:\tZ",
+            );
+            expect(status).toMatch(/State:\s+Z/);
+          } else expect(() => process.kill(pid!, 0)).toThrow();
+        },
+        { timeout: 1_000 },
+      );
+    } finally {
+      pid ??= Number(
+        await readFile(join(f.root, "child-pid"), "utf8").catch(() => "0"),
+      );
+      if (pid) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          /* Already stopped. */
+        }
+      }
+    }
+  },
+);

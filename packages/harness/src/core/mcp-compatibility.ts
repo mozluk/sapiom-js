@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { readFile, realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, resolve } from "node:path";
@@ -60,6 +60,100 @@ function probeEnvironment(launch: McpDevServerCommand): NodeJS.ProcessEnv {
   return env;
 }
 
+// Keep an owned leader alive while a broken probe's descendants retain pipes.
+// Same pipe-lifetime pattern as Desktop's bounded installer, scoped to this probe.
+const PROBE_RUNNER = `
+const {spawn} = require('node:child_process');
+const child = spawn(process.execPath, process.argv.slice(1), {stdio:['ignore','pipe','pipe'], windowsHide:true});
+child.stdout.pipe(process.stdout, {end:false});
+child.stderr.pipe(process.stderr, {end:false});
+child.on('error', () => { process.exitCode = 1; });
+child.on('close', code => { process.exitCode = code ?? 1; });
+`;
+
+function runProbe(
+  launch: McpDevServerCommand,
+  entry: string,
+  timeoutMs: number,
+): Promise<string | null> {
+  return new Promise((done) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(
+        launch.command,
+        ["-e", PROBE_RUNNER, ...launch.args, MCP_CAPABILITIES_FLAG],
+        {
+          cwd: dirname(entry),
+          env: probeEnvironment(launch),
+          windowsHide: true,
+          detached: process.platform !== "win32",
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+    } catch {
+      done(null);
+      return;
+    }
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    let stopping = false;
+    const finish = (output: string | null) => {
+      clearTimeout(timer);
+      done(output);
+    };
+    const stop = async () => {
+      if (stopping) return;
+      stopping = true;
+      if (child.pid && child.exitCode === null && child.signalCode === null) {
+        if (process.platform === "win32") {
+          await new Promise<void>((resolveStop) =>
+            execFile(
+              "taskkill.exe",
+              ["/pid", String(child.pid), "/T", "/F"],
+              {
+                windowsHide: true,
+                timeout: 1_000,
+                killSignal: "SIGKILL",
+                maxBuffer: HOST_MESSAGE_MAX_BYTES,
+              },
+              () => resolveStop(),
+            ),
+          );
+        } else {
+          try {
+            process.kill(-child.pid, "SIGKILL");
+          } catch {
+            /* Already exited. */
+          }
+        }
+        child.kill("SIGKILL");
+      }
+      // A separate deadline owns completion, even if a descendant retains pipes.
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      finish(null);
+    };
+    const timer = setTimeout(() => {
+      void stop();
+    }, timeoutMs);
+    child.stdout!.on("data", (chunk: Buffer) => {
+      bytes += chunk.length;
+      if (bytes > HOST_MESSAGE_MAX_BYTES) void stop();
+      else chunks.push(chunk);
+    });
+    child.stderr!.on("data", () => {
+      void stop();
+    });
+    child.once("error", () => {
+      void stop();
+    });
+    child.once("close", (code) => {
+      if (!stopping)
+        finish(code === 0 ? Buffer.concat(chunks).toString("utf8") : null);
+    });
+  });
+}
+
 /** Qualifies precisely the command returned in the result. Old binaries ignore
  * unknown flags, so never spawn one before checking its package support marker.
  * The actual MCP rechecks the returned descriptor/fingerprint when it starts.
@@ -101,26 +195,7 @@ export async function qualifyMcpCommand(
   } catch {
     return unavailable("missing");
   }
-  const output = await new Promise<string | null>((done) => {
-    try {
-      execFile(
-        launch.command,
-        [...launch.args, MCP_CAPABILITIES_FLAG],
-        {
-          cwd: dirname(entry),
-          env: probeEnvironment(launch),
-          windowsHide: true,
-          timeout: timeoutMs,
-          killSignal: "SIGKILL",
-          maxBuffer: HOST_MESSAGE_MAX_BYTES,
-          encoding: "utf8",
-        },
-        (error, stdout, stderr) => done(error || stderr ? null : stdout),
-      );
-    } catch {
-      done(null);
-    }
-  });
+  const output = await runProbe(launch, entry, timeoutMs);
   if (output === null) return unavailable("probe-failed");
   try {
     const after =
