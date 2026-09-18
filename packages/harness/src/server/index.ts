@@ -1,3 +1,5 @@
+import { STUDIO_HOST_CONTEXT_PATH } from "@sapiom/agent-map/host-protocol";
+import type { McpPreflightResult } from "../core/mcp-compatibility.js";
 import { LocalWorkspaceScopeCatalog } from "../core/workspace-scope-catalog.js";
 import { canonicalGraphPath } from "@sapiom/agent-map/node/canonical-graph-path";
 import { isWithinWorkspacePath, sourceRootsWithinScope } from "../core/workspace-path.js";
@@ -297,6 +299,8 @@ export interface HarnessServerOptions {
    *  server) plus the entry script it installed into the per-user npm prefix.
    *  See core/inject/mcp-config.ts. */
   sapiomDevMcp?: McpDevServerCommand;
+  /** Per-create/resume local preflight. Hosts own executable selection/installation. */
+  prepareSapiomDevMcp?: () => Promise<McpPreflightResult | undefined>;
   /** Root directory per-session generated agent configs are written under —
    *  and cleaned up from (exit-time delete + boot-time sweep, see
    *  core/inject/retention.ts). Defaults to `<stateRoot>/generated`. */
@@ -552,8 +556,21 @@ function createDefaultBuildLaunchOpts(
    * DEFAULT_SYSTEM_PROMPT offline — injectable so tests never touch the network.
    */
   loadSystemPrompt: () => Promise<string> = fetchSystemPromptForActiveEnvironment,
+  prepareSapiomDevMcp?: () => Promise<McpPreflightResult | undefined>,
 ): LaunchOptsBuilder {
   return async (harnessSessionId, req, context) => {
+    const prepared = await prepareSapiomDevMcp?.().catch(() => undefined);
+    if (prepareSapiomDevMcp) {
+      console.error(`[harness] MCP compatibility: ${prepared?.kind ?? "unverified"}; shared map activation off`);
+    }
+    const devServer = prepared?.launch ?? sapiomDevMcp;
+    // Shared map activation is deliberately off. The private tools and their
+    // matching prompt appendix remain the session's only map surface.
+    const studioHost = prepared?.kind === "verified" && context?.agentMapIdentity && context.agentMapMcp
+      ? { contextUrl: new URL(STUDIO_HOST_CONTEXT_PATH, context.agentMapMcp.url).href,
+          bearerToken: context.agentMapMcp.bearerToken, expectedMcp: prepared.descriptor }
+      : undefined;
+
     // Portable continue (SAP-2059). Resolved before the prompt file is
     // written, because for a `launch-flag` harness the brief IS part of that
     // file. Best-effort throughout: a brief that can't be assembled leaves
@@ -620,7 +637,8 @@ function createDefaultBuildLaunchOpts(
         apiKey,
         generatedRoot,
         harnessVersion: readVersion(),
-        ...(sapiomDevMcp ? { devServer: sapiomDevMcp } : {}),
+        ...(devServer ? { devServer } : {}),
+        ...(studioHost ? { studioHost } : {}),
         ...(context?.agentMapMcp ? { agentMap: context.agentMapMcp } : {}),
       }),
       promptPromise,
@@ -1433,6 +1451,7 @@ export const startServer = async (
       },
       options.sapiomDevMcp,
       options.loadSystemPrompt ?? fetchSystemPromptForActiveEnvironment,
+      options.prepareSapiomDevMcp,
     );
   /** Waits for prior cleanup before preparing this run's files and capabilities. */
   const buildLaunchOpts: LaunchOptsBuilder = async (
