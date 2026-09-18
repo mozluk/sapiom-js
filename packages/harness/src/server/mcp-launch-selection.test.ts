@@ -1,4 +1,11 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -206,4 +213,32 @@ it("keeps private tools and matching prompts when preflight fails on resume", as
   expect(
     await readFile(f.launches.at(-1)!.systemPromptFile!, "utf8"),
   ).toContain("agent_map_read");
+});
+
+it("retains a fresh project's scope through preflight when cwd is a filesystem alias", async () => {
+  const f = await fixture();
+  const project = join(root, "fresh-project");
+  const alias = join(root, "alias");
+  await mkdir(project);
+  await symlink(project, alias, "junction");
+  f.prepare.mockImplementationOnce(async () => {
+    // The UI reconciles the catalog while an offline probe is pending. macOS
+    // /var aliases and Windows short temp paths must retain the canonical root.
+    const response = await fetch(`http://127.0.0.1:${server!.port}/api/state`, {
+      headers: { "X-Harness-Token": "boot" },
+    });
+    expect(response.status).toBe(200);
+    return qualifyMcpCommand(f.command);
+  });
+  const session = await server!.sessionManager.create({
+    cwd: alias,
+    harness: "claude-code",
+  });
+  const identity = await new StudioProjectCatalog(
+    join(root, "studio-projects.json"),
+  ).resolveIdentityForPath(project);
+  expect(session.agentMapIdentity).toBeDefined();
+  expect(identity).not.toBeNull();
+  expect(session.agentMapIdentity?.projectId).toBe(identity?.projectId);
+  expect(session.status).toBe("running");
 });
