@@ -120,6 +120,7 @@ describe("TaskManager", () => {
    * agent tasks too, breaking any project on a different esbuild version.
    */
   it.each(["ESBUILD_BINARY_PATH", "SAPIOM_STUDIO_HOST_CONTEXT"])("never leaks ambient %s into a background task", async (key) => {
+    const previous = process.env[key];
     process.env[key] = "/app/resources/app.asar.unpacked/node_modules/@esbuild/linux-x64/bin/esbuild";
     try {
       const { manager, spawned } = makeManager();
@@ -129,7 +130,8 @@ describe("TaskManager", () => {
       // Targeted strip, not a clean environment — the agent still needs the rest.
       expect(spawned[0].options.env.PATH).toBe(process.env["PATH"]);
     } finally {
-      delete process.env[key];
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
     }
   });
 
