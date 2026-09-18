@@ -1,7 +1,7 @@
 import { STUDIO_HOST_CONTEXT_PATH } from "@sapiom/agent-map/host-protocol";
 import type { McpPreflightResult } from "../core/mcp-compatibility.js";
 import { LocalWorkspaceScopeCatalog } from "../core/workspace-scope-catalog.js";
-import { canonicalGraphPath } from "@sapiom/agent-map/node/canonical-graph-path";
+import { canonicalGraphPath, refreshCanonicalGraphPath } from "@sapiom/agent-map/node/canonical-graph-path";
 import { isWithinWorkspacePath, sourceRootsWithinScope } from "../core/workspace-path.js";
 import { AgentMapInitializationCoordinator } from "../core/agent-map-initialization.js";
 import { INITIAL_MAP_OUTPUT_SCHEMA } from "../core/agent-map-initialization-evidence.js";
@@ -1040,13 +1040,14 @@ export const startServer = async (
       );
       const retainedProjectSessionRoots = new Set<string>();
       // Pending launches contribute their trusted PROJECT root just like live
-      // sessions, not a descendant cwd that would mint a competing project.
+      // sessions. Resolve filesystem aliases before comparing with the catalog's
+      // canonical bindings, including during an awaited MCP preflight.
       const pendingCwds = [
         ...pendingProjectCwds,
         ...(sessionManager ? sessionManager.listPendingCreates() : []).flatMap((session) => {
           if (!session.agentMapIdentity) return [session.cwd];
           const root = projectSessionRoot(
-            { cwd: session.cwd, projectId: session.agentMapIdentity.projectId },
+            { cwd: refreshCanonicalGraphPath(session.cwd), projectId: session.agentMapIdentity.projectId },
             durableRootCandidates,
           );
           return root ? [root] : [];
@@ -1065,7 +1066,7 @@ export const startServer = async (
             }
             const root = projectSessionRoot(
               {
-                cwd: session.cwd,
+                cwd: refreshCanonicalGraphPath(session.cwd),
                 projectId: session.agentMapIdentity.projectId,
               },
               durableRootCandidates,
