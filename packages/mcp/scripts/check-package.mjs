@@ -10,13 +10,14 @@ const repo = resolve(packageRoot, "../..");
 const pnpm = process.env.npm_execpath;
 assert(pnpm && /pnpm(?:\.c?js)?$/.test(pnpm), "Run with pnpm test:package");
 const consumer = await mkdtemp(join(tmpdir(), "mcp-installed-contract-"));
-const run = (args, cwd) =>
+const run = (args, cwd, options = {}) =>
   execFileSync(process.execPath, [pnpm, ...args], {
     cwd,
     windowsHide: true,
     timeout: 120_000,
     maxBuffer: 4 * 1024 * 1024,
     env: { ...process.env, SAPIOM_TELEMETRY_DISABLED: "1" },
+    ...options,
   });
 try {
   // Pack the actual local production closure; workspace ranges must never
@@ -53,7 +54,11 @@ try {
       pnpm: { overrides },
     }),
   );
-  run(["install", "--ignore-scripts", "--no-frozen-lockfile"], consumer);
+  run(
+    ["install", "--prefer-offline", "--ignore-scripts", "--no-frozen-lockfile"],
+    consumer,
+    { timeout: 300_000, stdio: "inherit" },
+  );
   const runner = join(consumer, "installed-contract.mjs");
   await writeFile(
     runner,

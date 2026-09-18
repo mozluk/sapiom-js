@@ -119,6 +119,8 @@ try {
   ]) {
     status = mode === "unavailable-studio" ? 401 : 200;
     let stderr = "";
+    let tokenLeaked = false;
+    let unavailableWarning = false;
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: [entry],
@@ -133,7 +135,10 @@ try {
       },
     });
     transport.stderr?.on("data", (chunk) => {
-      stderr = (stderr + chunk).slice(-16_384);
+      const text = stderr + chunk;
+      tokenLeaked ||= text.includes(token);
+      unavailableWarning ||= text.includes("Studio map context unavailable");
+      stderr = text.slice(-16_384);
     });
     const stdio = new Client({ name: "installed-contract", version: "1" });
     try {
@@ -145,13 +150,10 @@ try {
         !tools.some((tool) => /(?:agent_map|sapiom_dev_map)/.test(tool.name)),
       );
       assert(!/sapiom_dev_(?:agent_)?map/.test(stdio.getInstructions() ?? ""));
-      assert(!stderr.includes(token));
-      assert.equal(
-        stderr.includes("Studio map context unavailable"),
-        mode === "unavailable-studio",
-      );
+      assert.equal(unavailableWarning, mode === "unavailable-studio");
     } finally {
       await stdio.close();
+      assert(!tokenLeaked);
     }
   }
   console.log(
