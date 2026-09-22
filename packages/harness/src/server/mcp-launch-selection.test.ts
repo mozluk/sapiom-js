@@ -107,6 +107,7 @@ async function fixture(
     webDir: web,
     launchDir: project,
     autoCreateSession: false,
+    sapiomDevMcp: cli ? undefined : command,
     prepareSapiomDevMcp: prepare,
     loadSystemPrompt: async () => {
       expect(prepare).toHaveBeenCalled();
@@ -197,17 +198,19 @@ it("keeps CLI's latest fallback unqualified when its dependency is old or unbuil
   ).toBeUndefined();
 });
 
-it("keeps private tools and matching prompts when preflight fails on resume", async () => {
+it.each(["missing", "rejected"])("falls back from the desktop command when preflight is %s on resume", async (failure) => {
   const f = await fixture();
   await server!.sessionManager.setAgentSessionId(
     f.session.id,
     "provider-session",
   );
   await server!.sessionManager.kill(f.session.id);
-  f.prepare.mockRejectedValueOnce(new Error("offline/failed preparation"));
+  if (failure === "missing") await rm(f.entry);
+  else f.prepare.mockRejectedValueOnce(new Error("offline/failed preparation"));
   await server!.sessionManager.resume(f.session.id);
   const config = await f.config();
   expect(config.mcpServers["sapiom-dev"].command).toBe("npx");
+  expect(config.mcpServers["sapiom-dev"].args).toEqual(["-y", "@sapiom/mcp@latest"]);
   expect(
     config.mcpServers["sapiom-dev"].env[STUDIO_HOST_CONTEXT_ENV],
   ).toBeUndefined();
