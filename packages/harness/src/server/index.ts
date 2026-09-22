@@ -1038,6 +1038,17 @@ export const startServer = async (
             cwd: binding.localRootRef,
           })),
       );
+      const readableSessionRoot = (cwd: string, projectId: string) => {
+        try {
+          return projectSessionRoot(
+            { cwd: refreshCanonicalGraphPath(cwd), projectId },
+            durableRootCandidates,
+          );
+        } catch {
+          // One unreadable session must not hide healthy workspace roots.
+          return null;
+        }
+      };
       const retainedProjectSessionRoots = new Set<string>();
       // Pending launches contribute their trusted PROJECT root just like live
       // sessions. Resolve filesystem aliases before comparing with the catalog's
@@ -1046,9 +1057,9 @@ export const startServer = async (
         ...pendingProjectCwds,
         ...(sessionManager ? sessionManager.listPendingCreates() : []).flatMap((session) => {
           if (!session.agentMapIdentity) return [session.cwd];
-          const root = projectSessionRoot(
-            { cwd: refreshCanonicalGraphPath(session.cwd), projectId: session.agentMapIdentity.projectId },
-            durableRootCandidates,
+          const root = readableSessionRoot(
+            session.cwd,
+            session.agentMapIdentity.projectId,
           );
           return root ? [root] : [];
         }),
@@ -1064,12 +1075,9 @@ export const startServer = async (
                 },
               ];
             }
-            const root = projectSessionRoot(
-              {
-                cwd: refreshCanonicalGraphPath(session.cwd),
-                projectId: session.agentMapIdentity.projectId,
-              },
-              durableRootCandidates,
+            const root = readableSessionRoot(
+              session.cwd,
+              session.agentMapIdentity.projectId,
             );
             // A neutral project session contributes its trusted project root,
             // never its descendant cwd. If its binding is stale, omit it from

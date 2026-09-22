@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { STUDIO_HOST_CONTEXT_ENV } from "@sapiom/agent-map/host-protocol";
+import { setCanonicalGraphPathProbeForTest } from "@sapiom/agent-map/node/canonical-graph-path";
 import { StudioProjectCatalog } from "@sapiom/agent-map/node/studio-project-catalog";
 import {
   mcpCommandForEntry,
@@ -36,6 +37,8 @@ const descriptor = {
 let root: string;
 let server: HarnessServer | undefined;
 afterEach(async () => {
+  setCanonicalGraphPathProbeForTest(null);
+  vi.restoreAllMocks();
   await server?.close();
   server = undefined;
   if (root) await rm(root, { recursive: true, force: true });
@@ -242,3 +245,70 @@ it("retains a fresh project's scope through preflight when cwd is a filesystem a
   expect(session.agentMapIdentity?.projectId).toBe(identity?.projectId);
   expect(session.status).toBe("running");
 });
+
+it.each(
+  ["pending", "live"].flatMap((kind) =>
+    ["EACCES", "EPERM", "EIO"].map((code) => ({ kind, code })),
+  ),
+)(
+  "isolates an unreadable $kind session cwd ($code)",
+  async ({ kind, code }) => {
+    const f = await fixture();
+    const manager = server!.sessionManager;
+    const healthyCwd = join(root, "healthy-project");
+    await mkdir(healthyCwd);
+    const healthy = await manager.create({
+      cwd: healthyCwd,
+      harness: "claude-code",
+    });
+    const unreadable = {
+      ...f.session,
+      id: "unreadable",
+      cwd: join(f.session.cwd, "unreadable"),
+    };
+    await mkdir(unreadable.cwd);
+    if (kind === "pending") {
+      const list = manager.listPendingCreates.bind(manager);
+      vi.spyOn(manager, "listPendingCreates").mockImplementation(() => [
+        ...list(),
+        unreadable,
+      ]);
+    } else {
+      const list = manager.list.bind(manager);
+      vi.spyOn(manager, "list").mockImplementation(() => [
+        ...list(),
+        unreadable,
+      ]);
+    }
+    const failedPaths: string[] = [];
+    setCanonicalGraphPathProbeForTest((path) => {
+      if (path === unreadable.cwd) {
+        failedPaths.push(path);
+        throw Object.assign(new Error("Unreadable session directory"), {
+          code,
+        });
+      }
+    });
+    const projectId = healthy.agentMapIdentity!.projectId;
+    const request = (path: string) =>
+      fetch(`http://127.0.0.1:${server!.port}/api${path}`, {
+        headers: { "X-Harness-Token": "boot" },
+      });
+    const state = await request("/state");
+    expect(state.status).toBe(200);
+    expect((await state.json()).workspaceScopes).toEqual(
+      expect.arrayContaining([expect.objectContaining({ projectId })]),
+    );
+    const map = await request(
+      `/projects/${projectId}/agent-map/implementations`,
+    );
+    expect(map.status).toBe(200);
+    const session = await manager.create({
+      cwd: healthyCwd,
+      harness: "claude-code",
+    });
+    expect(session.status).toBe("running");
+    expect(session.agentMapIdentity?.projectId).toBe(projectId);
+    expect(failedPaths).not.toHaveLength(0);
+  },
+);
