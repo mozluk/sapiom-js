@@ -12,7 +12,7 @@ import { register as registerAppPublish } from "./tools/app-publish.js";
 import { register as registerAppManage } from "./tools/app-manage.js";
 import { register as registerFeedback } from "./tools/feedback.js";
 import { studioHostContext } from "./studio-host-context.js";
-import { fetchInstructions } from "./instructions-fetch.js";
+import { resolveInstructions } from "./instructions-fetch.js";
 
 async function main(): Promise<void> {
   const host = await studioHostContext.resolve();
@@ -36,9 +36,13 @@ async function main(): Promise<void> {
   // telemetry opt-outs (SAPIOM_TELEMETRY_DISABLED=1, DO_NOT_TRACK=1).
   configureAnalytics({ apiKey: env.credentials?.apiKey });
 
-  // Pull the latest authoring instructions from the backend (falls back to the
-  // bundled copy offline / on error), so guidance can change without a release.
-  const instructions = await fetchInstructions(env);
+  // Pull the latest authoring instructions from the backend, then the
+  // last-known-good cache, then the bundled snapshot — so guidance can change
+  // without a release. One provenance line on stderr (stdout is the transport).
+  const primer = await resolveInstructions(env);
+  console.error(
+    `sapiom-dev: authoring primer source=${primer.source} release=${primer.release ?? "unknown"} digest=${primer.digest ?? "unknown"}`,
+  );
 
   const server = new McpServer(
     {
@@ -58,8 +62,8 @@ async function main(): Promise<void> {
     {
       // Returned in the MCP `initialize` handshake; capable clients surface it to the
       // model on connect, so an agent that adds this server gets the authoring primer
-      // automatically. Fetched from the backend; bundled fallback in ./instructions.ts.
-      instructions,
+      // automatically. Resolved above: live, last-known-good, or bundled snapshot.
+      instructions: primer.body,
     },
   );
 
