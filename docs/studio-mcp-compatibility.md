@@ -13,6 +13,7 @@ watcher are advertised by this change.
 | New Studio / old MCP                                   | Missing probe marker means no probe execution. Keep the existing private tools and prompts.                                                                                      |
 | CLI dependency old, missing or unbuilt                 | Retain `npx -y @sapiom/mcp@latest`, explicitly unverified. Never qualify one package and launch a fresh registry resolution under that result.                                   |
 | Desktop offline or failed refresh                      | Reuse a surviving cached installation; retain the installer's existing npx fallback if none survives. Preflight never installs or refreshes. Private map tools remain available. |
+| Desktop entry fails preflight                          | Discard the damaged or unverified command and retain the unqualified npx fallback. Accepted legacy commands keep their existing launch path.                                     |
 | Resume or package rollback                             | Requalify the current executable before generating configuration and rotate the existing session credential.                                                                     |
 | Invalid, revoked or unreachable claimed Studio context | Classify as unavailable Studio. Existing developer tools continue; do not grant standalone map authority.                                                                        |
 

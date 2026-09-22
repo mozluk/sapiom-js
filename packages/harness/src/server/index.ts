@@ -551,7 +551,10 @@ function createDefaultBuildLaunchOpts(
     if (prepareSapiomDevMcp) {
       console.error(`[harness] MCP compatibility: ${prepared?.kind ?? "unverified"}; shared map activation off`);
     }
-    const devServer = prepared?.launch ?? sapiomDevMcp;
+    // A rejected preflight must not revive the host's unchecked static command.
+    const devServer = prepareSapiomDevMcp
+      ? prepared?.kind === "unavailable" ? undefined : prepared?.launch
+      : sapiomDevMcp;
     // Shared map activation is deliberately off. The private tools and their
     // matching prompt appendix remain the session's only map surface.
     const studioHost = prepared?.kind === "verified" && context?.agentMapIdentity && context.agentMapMcp
