@@ -1,3 +1,4 @@
+import { promises as fs } from "node:fs";
 import {
   mkdtemp,
   mkdir,
@@ -10,7 +11,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { STUDIO_HOST_CONTEXT_ENV } from "@sapiom/agent-map/host-protocol";
-import { setCanonicalGraphPathProbeForTest } from "@sapiom/agent-map/node/canonical-graph-path";
 import { StudioProjectCatalog } from "@sapiom/agent-map/node/studio-project-catalog";
 import {
   mcpCommandForEntry,
@@ -37,7 +37,6 @@ const descriptor = {
 let root: string;
 let server: HarnessServer | undefined;
 afterEach(async () => {
-  setCanonicalGraphPathProbeForTest(null);
   vi.restoreAllMocks();
   await server?.close();
   server = undefined;
@@ -281,13 +280,15 @@ it.each(
       ]);
     }
     const failedPaths: string[] = [];
-    setCanonicalGraphPathProbeForTest((path) => {
+    const realpath = fs.realpath;
+    vi.spyOn(fs, "realpath").mockImplementation(async (path, options) => {
       if (path === unreadable.cwd) {
         failedPaths.push(path);
         throw Object.assign(new Error("Unreadable session directory"), {
           code,
         });
       }
+      return realpath(path, options);
     });
     const projectId = healthy.agentMapIdentity!.projectId;
     const request = (path: string) =>
