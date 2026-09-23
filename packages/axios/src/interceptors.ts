@@ -113,6 +113,36 @@ function getPaymentHeaderName(payload: any): string {
 }
 
 /**
+ * Header names that must never be sent to the Sapiom backend in telemetry
+ * or transaction metadata: they can carry credentials or session material.
+ * Substring matching (case-insensitive) so variants such as
+ * "proxy-authorization", "x-goog-api-key" or "set-cookie" are also covered.
+ */
+function isSensitiveHeaderName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return (
+    lower.includes("auth") ||
+    lower.includes("key") ||
+    lower.includes("token") ||
+    lower.includes("cookie")
+  );
+}
+
+/** Copy a headers object into a plain object, dropping sensitive headers. */
+function sanitizeHeaders(
+  headers: Record<string, any> | undefined,
+): Record<string, string> {
+  const sanitized: Record<string, string> = {};
+  if (!headers) return sanitized;
+  for (const [key, value] of Object.entries(headers)) {
+    if (!isSensitiveHeaderName(key)) {
+      sanitized[key] = String(value);
+    }
+  }
+  return sanitized;
+}
+
+/**
  * Reads a stream into a Buffer. Handles two stream flavors:
  * - Async iterables (Node.js Readable in modern Node)
  * - Pipe-based streams (e.g. form-data's CombinedStream which lacks Symbol.asyncIterator)
@@ -407,21 +437,9 @@ export function addAuthorizationInterceptor(
         };
       }
 
-      const sanitizedHeaders: Record<string, string> = {};
-      if (axiosConfig.headers) {
-        Object.entries(axiosConfig.headers as Record<string, any>).forEach(
-          ([key, value]) => {
-            const lowerKey = key.toLowerCase();
-            if (
-              !lowerKey.includes("auth") &&
-              !lowerKey.includes("key") &&
-              !lowerKey.includes("token")
-            ) {
-              sanitizedHeaders[key] = String(value);
-            }
-          },
-        );
-      }
+      const sanitizedHeaders = sanitizeHeaders(
+        axiosConfig.headers as Record<string, any> | undefined,
+      );
 
       const requestFacts: HttpClientRequestFacts = {
         method,
@@ -628,7 +646,13 @@ export function addPaymentInterceptor(
                       url: originalConfig.url,
                       method: originalConfig.method,
                     },
-                    responseHeaders: error.response?.headers,
+                    // Sanitized: 402 response headers may carry credentials
+                    // (e.g. set-cookie) that must not be sent to the Sapiom API.
+                    responseHeaders: sanitizeHeaders(
+                      error.response?.headers as
+                        | Record<string, any>
+                        | undefined,
+                    ),
                     httpStatusCode: 402,
                   },
                 },
@@ -657,7 +681,11 @@ export function addPaymentInterceptor(
                   url: originalConfig.url,
                   method: originalConfig.method,
                 },
-                responseHeaders: error.response?.headers,
+                // Sanitized: 402 response headers may carry credentials
+                // (e.g. set-cookie) that must not be sent to the Sapiom API.
+                responseHeaders: sanitizeHeaders(
+                  error.response?.headers as Record<string, any> | undefined,
+                ),
                 httpStatusCode: 402,
               },
             },
@@ -720,9 +748,18 @@ export function addPaymentInterceptor(
       const authorizationPayload = transaction.payment?.authorizationPayload;
 
       if (!authorizationPayload) {
-        throw new Error(
+        // Clear payment handling flag so the completion interceptor fires
+        (originalConfig as any).__sapiomPaymentHandling = false;
+        const payloadError = new Error(
           `Transaction ${transaction.id} is authorized but missing payment authorization payload`,
         );
+        // failureMode "open": surface the original 402 instead of a new error
+        if (config.failureMode === "closed") throw payloadError;
+        console.error(
+          "[Sapiom] Authorized transaction is missing payment authorization payload, returning 402:",
+          payloadError,
+        );
+        return Promise.reject(error);
       }
 
       const paymentHeaderValue =
@@ -789,21 +826,9 @@ export function addCompletionInterceptor(
         const startTime = (axiosConfig as any).__sapiomStartTime || Date.now();
         const durationMs = Date.now() - startTime;
 
-        const sanitizedHeaders: Record<string, string> = {};
-        const sensitiveHeaders = new Set([
-          "set-cookie",
-          "authorization",
-          "x-api-key",
-        ]);
-        if (response.headers) {
-          Object.entries(response.headers as Record<string, any>).forEach(
-            ([key, value]) => {
-              if (!sensitiveHeaders.has(key.toLowerCase())) {
-                sanitizedHeaders[key] = String(value);
-              }
-            },
-          );
-        }
+        const sanitizedHeaders = sanitizeHeaders(
+          response.headers as Record<string, any> | undefined,
+        );
 
         const facts: HttpClientResponseFacts = {
           status: response.status,

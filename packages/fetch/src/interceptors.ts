@@ -99,6 +99,51 @@ function getPaymentHeaderName(payload: any): string {
 }
 
 /**
+ * Header names that must never be sent to the Sapiom backend in telemetry
+ * or transaction metadata: they can carry credentials or session material.
+ * Substring matching (case-insensitive) so variants such as
+ * "proxy-authorization", "x-goog-api-key" or "set-cookie" are also covered.
+ */
+function isSensitiveHeaderName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return (
+    lower.includes("auth") ||
+    lower.includes("key") ||
+    lower.includes("token") ||
+    lower.includes("cookie")
+  );
+}
+
+/** Copy a header collection into a plain object, dropping sensitive headers. */
+function sanitizeHeaders(
+  headers: Iterable<[string, string]>,
+): Record<string, string> {
+  const sanitized: Record<string, string> = {};
+  for (const [key, value] of headers) {
+    if (!isSensitiveHeaderName(key)) {
+      sanitized[key] = value;
+    }
+  }
+  return sanitized;
+}
+
+/**
+ * Base64-encode a UTF-8 string. `btoa` only accepts Latin-1 input and throws
+ * on non-Latin-1 characters, so encode through UTF-8 bytes first.
+ */
+function base64EncodeUtf8(text: string): string {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(text, "utf-8").toString("base64");
+  }
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
+/**
  * Create authorization wrapper for fetch
  */
 export async function handleAuthorization(
@@ -195,19 +240,7 @@ export async function handleAuthorization(
     port: parsedUrl.port ? parseInt(parsedUrl.port) : null,
   };
 
-  const sanitizedHeaders: Record<string, string> = {};
-  const sensitiveHeaders = new Set([
-    "authorization",
-    "cookie",
-    "x-api-key",
-    "x-auth-token",
-  ]);
-
-  for (const [key, value] of request.headers.entries()) {
-    if (!sensitiveHeaders.has(key.toLowerCase())) {
-      sanitizedHeaders[key] = value;
-    }
-  }
+  const sanitizedHeaders = sanitizeHeaders(request.headers.entries());
 
   const requestFacts: HttpClientRequestFacts = {
     method,
@@ -304,7 +337,13 @@ export async function handleAuthorization(
   const headers = new Headers(request.headers);
   setHeader(headers, "X-Sapiom-Transaction-Id", transaction.id);
 
-  return new Request(request, { headers });
+  const authorizedRequest = new Request(request, { headers });
+  // The Request constructor does not copy custom own properties; carry
+  // per-request __sapiom metadata over so handlePayment can still see it.
+  if ((request as any).__sapiom !== undefined) {
+    (authorizedRequest as any).__sapiom = (request as any).__sapiom;
+  }
+  return authorizedRequest;
 }
 
 /**
@@ -445,7 +484,9 @@ export async function handlePayment(
             url: request.url,
             method: request.method,
           },
-          responseHeaders: Object.fromEntries(response.headers.entries()),
+          // Sanitized: 402 response headers may carry credentials
+          // (e.g. set-cookie) that must not be sent to the Sapiom API.
+          responseHeaders: sanitizeHeaders(response.headers.entries()),
           httpStatusCode: 402,
         },
       },
@@ -485,15 +526,22 @@ export async function handlePayment(
   const authorizationPayload = transaction.payment?.authorizationPayload;
 
   if (!authorizationPayload) {
-    throw new Error(
+    const payloadError = new Error(
       `Transaction ${transaction.id} is authorized but missing payment authorization payload`,
     );
+    // failureMode "open": surface the original 402 instead of a new error
+    if (config.failureMode === "closed") throw payloadError;
+    console.error(
+      "[Sapiom] Authorized transaction is missing payment authorization payload, returning 402:",
+      payloadError,
+    );
+    return response;
   }
 
   const paymentHeaderValue =
     typeof authorizationPayload === "string"
       ? authorizationPayload
-      : btoa(JSON.stringify(authorizationPayload));
+      : base64EncodeUtf8(JSON.stringify(authorizationPayload));
 
   // Select header name based on x402 version (V1: X-PAYMENT, V2: PAYMENT-SIGNATURE)
   const headerName = getPaymentHeaderName(authorizationPayload);
@@ -537,19 +585,9 @@ export function handleCompletion(
   const durationMs = Date.now() - startTime;
   const isSuccess = response !== null && response.ok;
 
-  const sanitizedHeaders: Record<string, string> = {};
-  if (response) {
-    const sensitiveHeaders = new Set([
-      "set-cookie",
-      "authorization",
-      "x-api-key",
-    ]);
-    for (const [key, value] of response.headers.entries()) {
-      if (!sensitiveHeaders.has(key.toLowerCase())) {
-        sanitizedHeaders[key] = value;
-      }
-    }
-  }
+  const sanitizedHeaders: Record<string, string> = response
+    ? sanitizeHeaders(response.headers.entries())
+    : {};
 
   let responseFacts:
     | { source: string; version: string; facts: Record<string, any> }

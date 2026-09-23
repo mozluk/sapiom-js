@@ -107,6 +107,36 @@ function getPaymentHeaderName(payload: any): string {
 }
 
 /**
+ * Header names that must never be sent to the Sapiom backend in telemetry
+ * or transaction metadata: they can carry credentials or session material.
+ * Substring matching (case-insensitive) so variants such as
+ * "proxy-authorization", "x-goog-api-key" or "set-cookie" are also covered.
+ */
+function isSensitiveHeaderName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return (
+    lower.includes("auth") ||
+    lower.includes("key") ||
+    lower.includes("token") ||
+    lower.includes("cookie")
+  );
+}
+
+/** Copy a headers object into a plain object, dropping sensitive headers. */
+function sanitizeHeaders(
+  headers: Record<string, any> | undefined,
+): Record<string, string> {
+  const sanitized: Record<string, string> = {};
+  if (!headers) return sanitized;
+  for (const [key, value] of Object.entries(headers)) {
+    if (!isSensitiveHeaderName(key)) {
+      sanitized[key] = String(value);
+    }
+  }
+  return sanitized;
+}
+
+/**
  * Handle authorization for a request
  */
 export async function handleAuthorization(
@@ -200,19 +230,7 @@ export async function handleAuthorization(
     port: parsedUrl.port ? parseInt(parsedUrl.port) : null,
   };
 
-  const sanitizedHeaders: Record<string, string> = {};
-  const sensitiveHeaders = new Set([
-    "authorization",
-    "cookie",
-    "x-api-key",
-    "x-auth-token",
-  ]);
-
-  for (const [key, value] of Object.entries(request.headers)) {
-    if (!sensitiveHeaders.has(key.toLowerCase())) {
-      sanitizedHeaders[key] = value;
-    }
-  }
+  const sanitizedHeaders = sanitizeHeaders(request.headers);
 
   const requestFacts: HttpClientRequestFacts = {
     method,
@@ -361,7 +379,9 @@ export async function handlePayment(
             url: originalRequest.url,
             method: originalRequest.method,
           },
-          responseHeaders: error.response?.headers,
+          // Sanitized: 402 response headers may carry credentials
+          // (e.g. set-cookie) that must not be sent to the Sapiom API.
+          responseHeaders: sanitizeHeaders(error.response?.headers),
           httpStatusCode: 402,
         },
       },
@@ -407,9 +427,16 @@ export async function handlePayment(
   const authorizationPayload = transaction.payment?.authorizationPayload;
 
   if (!authorizationPayload) {
-    throw new Error(
+    const payloadError = new Error(
       `Transaction ${transaction.id} is authorized but missing payment authorization payload`,
     );
+    // failureMode "open": surface the original 402 instead of a new error
+    if (config.failureMode === "closed") throw payloadError;
+    console.error(
+      "[Sapiom] Authorized transaction is missing payment authorization payload, returning 402:",
+      payloadError,
+    );
+    throw error;
   }
 
   const paymentHeaderValue =
@@ -459,19 +486,7 @@ export function handleCompletion<T>(
   const isSuccess =
     response !== null && response.status >= 200 && response.status < 300;
 
-  const sanitizedHeaders: Record<string, string> = {};
-  if (response?.headers) {
-    const sensitiveHeaders = new Set([
-      "set-cookie",
-      "authorization",
-      "x-api-key",
-    ]);
-    Object.entries(response.headers).forEach(([key, value]) => {
-      if (!sensitiveHeaders.has(key.toLowerCase())) {
-        sanitizedHeaders[key] = String(value);
-      }
-    });
-  }
+  const sanitizedHeaders = sanitizeHeaders(response?.headers);
 
   let responseFacts:
     | { source: string; version: string; facts: Record<string, any> }
