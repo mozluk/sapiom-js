@@ -17,7 +17,7 @@ import {
 import type { TransactionPollingConfig } from "@sapiom/core";
 
 /**
- * Authorization configuration
+ * Authorization configuration for node-http.
  */
 export interface AuthorizationConfig {
   sapiomClient: SapiomClient;
@@ -26,7 +26,7 @@ export interface AuthorizationConfig {
 }
 
 /**
- * Payment configuration
+ * Payment configuration for node-http.
  */
 export interface PaymentConfig {
   sapiomClient: SapiomClient;
@@ -42,7 +42,7 @@ const DEFAULT_POLLING: Required<TransactionPollingConfig> = {
 };
 
 /**
- * Custom error classes
+ * Error thrown when transaction authorization is denied.
  */
 export class AuthorizationDeniedError extends Error {
   constructor(
@@ -57,6 +57,9 @@ export class AuthorizationDeniedError extends Error {
   }
 }
 
+/**
+ * Error thrown when transaction authorization times out.
+ */
 export class AuthorizationTimeoutError extends Error {
   constructor(
     public readonly transactionId: string,
@@ -68,6 +71,9 @@ export class AuthorizationTimeoutError extends Error {
   }
 }
 
+/**
+ * Case-insensitively retrieves a header value from a headers map.
+ */
 function getHeader(
   headers: Record<string, string>,
   name: string,
@@ -81,6 +87,9 @@ function getHeader(
   return undefined;
 }
 
+/**
+ * Case-insensitively sets or overwrites a header in a headers map.
+ */
 function setHeader(
   headers: Record<string, string>,
   name: string,
@@ -96,7 +105,7 @@ function setHeader(
 }
 
 /**
- * Get the correct payment header name based on x402 version
+ * Get the correct payment header name based on x402 version.
  * V1: X-PAYMENT, V2: PAYMENT-SIGNATURE
  */
 function getPaymentHeaderName(payload: any): string {
@@ -109,12 +118,13 @@ function getPaymentHeaderName(payload: any): string {
 /**
  * Header names that must never be sent to the Sapiom backend in telemetry
  * or transaction metadata: they can carry credentials or session material.
- * Substring matching (case-insensitive) so variants such as
- * "proxy-authorization", "x-goog-api-key" or "set-cookie" are also covered.
+ * Substring matching (case-insensitive) covers variants such as
+ * "sapiom-identity", "proxy-authorization", "x-goog-api-key" or "set-cookie".
  */
 function isSensitiveHeaderName(name: string): boolean {
   const lower = name.toLowerCase();
   return (
+    lower.includes("sapiom-identity") ||
     lower.includes("auth") ||
     lower.includes("key") ||
     lower.includes("token") ||
@@ -122,7 +132,9 @@ function isSensitiveHeaderName(name: string): boolean {
   );
 }
 
-/** Copy a headers object into a plain object, dropping sensitive headers. */
+/**
+ * Copy a headers object into a plain object, dropping sensitive headers.
+ */
 function sanitizeHeaders(
   headers: Record<string, any> | undefined,
 ): Record<string, string> {
@@ -137,7 +149,7 @@ function sanitizeHeaders(
 }
 
 /**
- * Handle authorization for a request
+ * Handle pre-flight authorization for node-http requests.
  */
 export async function handleAuthorization(
   request: HttpRequest,
@@ -331,10 +343,7 @@ export async function handleAuthorization(
 }
 
 /**
- * Handle payment errors (402 responses)
- *
- * Reauthorizes the existing transaction with payment data from the 402 response,
- * then retries the request with the X-PAYMENT header.
+ * Handle payment errors (402 responses) for node-http.
  */
 export async function handlePayment(
   originalRequest: HttpRequest,
@@ -347,7 +356,6 @@ export async function handlePayment(
     throw error;
   }
 
-  // Extract raw x402 response (no pre-processing)
   const x402Response = extractX402Response(error);
   const resource = extractResourceFromError(error);
 
@@ -355,21 +363,17 @@ export async function handlePayment(
     throw error;
   }
 
-  // Get existing transaction ID from the request (set by authorization interceptor)
   const existingTransactionId = getHeader(
     originalRequest.headers,
     "X-Sapiom-Transaction-Id",
   );
 
   if (!existingTransactionId) {
-    // No existing transaction - throw the original error
-    // This can happen if authorization was skipped or failed
     throw error;
   }
 
   let transaction;
   try {
-    // Reauthorize the existing transaction with payment data
     transaction = await config.sapiomClient.transactions.reauthorizeWithPayment(
       existingTransactionId,
       {
@@ -379,8 +383,6 @@ export async function handlePayment(
             url: originalRequest.url,
             method: originalRequest.method,
           },
-          // Sanitized: 402 response headers may carry credentials
-          // (e.g. set-cookie) that must not be sent to the Sapiom API.
           responseHeaders: sanitizeHeaders(error.response?.headers),
           httpStatusCode: 402,
         },
@@ -430,7 +432,6 @@ export async function handlePayment(
     const payloadError = new Error(
       `Transaction ${transaction.id} is authorized but missing payment authorization payload`,
     );
-    // failureMode "open": surface the original 402 instead of a new error
     if (config.failureMode === "closed") throw payloadError;
     console.error(
       "[Sapiom] Authorized transaction is missing payment authorization payload, returning 402:",
@@ -444,7 +445,6 @@ export async function handlePayment(
       ? authorizationPayload
       : Buffer.from(JSON.stringify(authorizationPayload)).toString("base64");
 
-  // Select header name based on x402 version (V1: X-PAYMENT, V2: PAYMENT-SIGNATURE)
   const headerName = getPaymentHeaderName(authorizationPayload);
 
   const retryRequest = { ...originalRequest };
@@ -452,22 +452,18 @@ export async function handlePayment(
   setHeader(retryRequest.headers, headerName, paymentHeaderValue);
 
   const retryResponse = await requestFn(retryRequest);
-
   return retryResponse;
 }
 
 /**
- * Completion configuration
+ * Completion configuration for node-http.
  */
 export interface CompletionConfig {
   sapiomClient: SapiomClient;
 }
 
 /**
- * Handle transaction completion after request finishes (fire-and-forget)
- *
- * This should be called after the HTTP request completes to mark the transaction
- * as COMPLETED with the appropriate outcome (success/error).
+ * Handle transaction completion after request finishes (fire-and-forget).
  */
 export function handleCompletion<T>(
   request: HttpRequest,
@@ -526,7 +522,6 @@ export function handleCompletion<T>(
     };
   }
 
-  // Fire-and-forget: complete the transaction without blocking
   config.sapiomClient.transactions
     .complete(transactionId, {
       outcome: isSuccess ? "success" : "error",
