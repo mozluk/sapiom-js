@@ -22,7 +22,7 @@ import {
 import type { TransactionPollingConfig } from "@sapiom/core";
 
 /**
- * Authorization interceptor configuration
+ * Authorization interceptor configuration for Axios.
  */
 export interface AuthorizationInterceptorConfig {
   sapiomClient: SapiomClient;
@@ -31,7 +31,7 @@ export interface AuthorizationInterceptorConfig {
 }
 
 /**
- * Payment interceptor configuration
+ * Payment interceptor configuration for Axios.
  */
 export interface PaymentInterceptorConfig {
   sapiomClient: SapiomClient;
@@ -47,7 +47,7 @@ const DEFAULT_POLLING: Required<TransactionPollingConfig> = {
 };
 
 /**
- * Custom error classes
+ * Error thrown when transaction authorization is denied.
  */
 export class AuthorizationDeniedError extends Error {
   constructor(
@@ -62,6 +62,9 @@ export class AuthorizationDeniedError extends Error {
   }
 }
 
+/**
+ * Error thrown when transaction authorization times out.
+ */
 export class AuthorizationTimeoutError extends Error {
   constructor(
     public readonly transactionId: string,
@@ -73,6 +76,9 @@ export class AuthorizationTimeoutError extends Error {
   }
 }
 
+/**
+ * Case-insensitively retrieves a header value from a record object.
+ */
 function getHeader(
   headers: Record<string, any> | undefined,
   name: string,
@@ -87,6 +93,9 @@ function getHeader(
   return undefined;
 }
 
+/**
+ * Case-insensitively sets or overwrites a header in a record object.
+ */
 function setHeader(
   headers: Record<string, any>,
   name: string,
@@ -102,7 +111,7 @@ function setHeader(
 }
 
 /**
- * Get the correct payment header name based on x402 version
+ * Get the correct payment header name based on x402 version.
  * V1: X-PAYMENT, V2: PAYMENT-SIGNATURE
  */
 function getPaymentHeaderName(payload: any): string {
@@ -115,12 +124,13 @@ function getPaymentHeaderName(payload: any): string {
 /**
  * Header names that must never be sent to the Sapiom backend in telemetry
  * or transaction metadata: they can carry credentials or session material.
- * Substring matching (case-insensitive) so variants such as
- * "proxy-authorization", "x-goog-api-key" or "set-cookie" are also covered.
+ * Substring matching (case-insensitive) covers variants such as
+ * "sapiom-identity", "proxy-authorization", "x-goog-api-key" or "set-cookie".
  */
 function isSensitiveHeaderName(name: string): boolean {
   const lower = name.toLowerCase();
   return (
+    lower.includes("sapiom-identity") ||
     lower.includes("auth") ||
     lower.includes("key") ||
     lower.includes("token") ||
@@ -128,7 +138,9 @@ function isSensitiveHeaderName(name: string): boolean {
   );
 }
 
-/** Copy a headers object into a plain object, dropping sensitive headers. */
+/**
+ * Copy a headers object into a plain object, dropping sensitive headers.
+ */
 function sanitizeHeaders(
   headers: Record<string, any> | undefined,
 ): Record<string, string> {
@@ -143,12 +155,9 @@ function sanitizeHeaders(
 }
 
 /**
- * Reads a stream into a Buffer. Handles two stream flavors:
- * - Async iterables (Node.js Readable in modern Node)
- * - Pipe-based streams (e.g. form-data's CombinedStream which lacks Symbol.asyncIterator)
+ * Reads a stream into a Buffer for replayability.
  */
 async function streamToBuffer(stream: any): Promise<Buffer> {
-  // Async iterable (Node.js Readable in modern Node, ReadableStream adapters)
   if (typeof stream[Symbol.asyncIterator] === "function") {
     const chunks: Buffer[] = [];
     for await (const chunk of stream) {
@@ -157,7 +166,6 @@ async function streamToBuffer(stream: any): Promise<Buffer> {
     return Buffer.concat(chunks);
   }
 
-  // Pipe-based stream (e.g. form-data's CombinedStream)
   return new Promise<Buffer>((resolve, reject) => {
     const chunks: Buffer[] = [];
     stream.on("data", (chunk: any) => {
@@ -165,8 +173,6 @@ async function streamToBuffer(stream: any): Promise<Buffer> {
     });
     stream.on("end", () => resolve(Buffer.concat(chunks)));
     stream.on("error", reject);
-    // CombinedStream (used by form-data) doesn't auto-flow on data listener —
-    // it needs resume() to start emitting
     if (typeof stream.resume === "function") {
       stream.resume();
     }
@@ -175,57 +181,41 @@ async function streamToBuffer(stream: any): Promise<Buffer> {
 
 /** Result of converting a request body to a replayable form. */
 interface ReplayableBodyResult {
-  /** The (possibly converted) body data to use for the request. */
   data: any;
-  /** Byte size of the body, or undefined if not determinable. */
   bodySizeBytes: number | undefined;
-  /** Headers captured from the original body (e.g. content-type from FormData). */
   extraHeaders?: Record<string, string>;
 }
 
 /**
  * Converts the request body to a form that can be replayed on 402 retry.
- *
- * Streams and FormData (form-data package) are buffered into memory so they
- * can be re-sent. If a `bodyFactory` is provided via `__sapiom` config, the
- * stream is left as-is and a fresh body is created on retry instead.
- *
- * Also computes `bodySizeBytes` for request facts, replacing the previous
- * `JSON.stringify(data).length` which was incorrect for non-JSON bodies.
  */
 async function ensureReplayableBody(
   config: InternalAxiosRequestConfig,
 ): Promise<ReplayableBodyResult> {
   const data = config.data;
 
-  // null/undefined — pass through
   if (data == null) {
     return { data, bodySizeBytes: undefined };
   }
 
-  // string
   if (typeof data === "string") {
     return { data, bodySizeBytes: Buffer.byteLength(data) };
   }
 
-  // Buffer
   if (Buffer.isBuffer(data)) {
     return { data, bodySizeBytes: data.length };
   }
 
-  // ArrayBuffer
   if (data instanceof ArrayBuffer) {
     const buf = Buffer.from(data);
-    return { data: buf, bodySizeBytes: buf.length };
+    return { data, bodySizeBytes: buf.length };
   }
 
-  // TypedArray (e.g. Uint8Array)
   if (ArrayBuffer.isView(data) && !(data instanceof DataView)) {
     const buf = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
-    return { data: buf, bodySizeBytes: data.byteLength };
+    return { data, bodySizeBytes: data.byteLength };
   }
 
-  // URLSearchParams
   if (
     typeof URLSearchParams !== "undefined" &&
     data instanceof URLSearchParams
@@ -234,7 +224,6 @@ async function ensureReplayableBody(
     return { data: str, bodySizeBytes: Buffer.byteLength(str) };
   }
 
-  // FormData (form-data package): has both getHeaders() and pipe()
   if (
     typeof data.getHeaders === "function" &&
     typeof data.pipe === "function"
@@ -244,17 +233,14 @@ async function ensureReplayableBody(
     return { data: buf, bodySizeBytes: buf.length, extraHeaders };
   }
 
-  // Node.js Readable stream or async iterable
   if (
     typeof data.pipe === "function" ||
     typeof data[Symbol.asyncIterator] === "function"
   ) {
     const bodyFactory = (config as any).__sapiom?.bodyFactory;
     if (bodyFactory) {
-      // Leave data as-is; on retry, bodyFactory() will produce a fresh stream
       return { data, bodySizeBytes: undefined };
     }
-    // Auto-buffer with warning
     console.warn(
       "[Sapiom] Buffering stream body into memory for 402 retry support. To avoid this, provide a bodyFactory in __sapiom config.",
     );
@@ -262,13 +248,11 @@ async function ensureReplayableBody(
     return { data: buf, bodySizeBytes: buf.length };
   }
 
-  // Blob
   if (typeof Blob !== "undefined" && data instanceof Blob) {
     const buf = Buffer.from(await data.arrayBuffer());
-    return { data: buf, bodySizeBytes: buf.length };
+    return { data, bodySizeBytes: buf.length };
   }
 
-  // Plain object or other JSON-serializable value
   try {
     const json = JSON.stringify(data);
     return { data, bodySizeBytes: Buffer.byteLength(json) };
@@ -278,7 +262,7 @@ async function ensureReplayableBody(
 }
 
 /**
- * Add authorization request interceptor to axios instance
+ * Add authorization request interceptor to axios instance.
  */
 export function addAuthorizationInterceptor(
   axiosInstance: AxiosInstance,
@@ -293,7 +277,6 @@ export function addAuthorizationInterceptor(
         return axiosConfig;
       }
 
-      // Ensure request body is replayable for 402 retry
       let replayableBody: ReplayableBodyResult;
       try {
         replayableBody = await ensureReplayableBody(axiosConfig);
@@ -308,7 +291,6 @@ export function addAuthorizationInterceptor(
           }
         }
       } catch (bufferError) {
-        // If buffering fails, continue with original data (no worse than current behavior)
         replayableBody = { data: axiosConfig.data, bodySizeBytes: undefined };
         console.error("[Sapiom] Failed to buffer request body:", bufferError);
       }
@@ -548,6 +530,9 @@ export function addAuthorizationInterceptor(
   return () => axiosInstance.interceptors.request.eject(interceptorId);
 }
 
+/**
+ * Transforms an AxiosError into an internal HttpError facts structure.
+ */
 function axiosErrorToHttpError(error: AxiosError): HttpError {
   return {
     message: error.message,
@@ -576,7 +561,7 @@ function axiosErrorToHttpError(error: AxiosError): HttpError {
 }
 
 /**
- * Add payment response interceptor to axios instance
+ * Add payment response interceptor to axios instance.
  */
 export function addPaymentInterceptor(
   axiosInstance: AxiosInstance,
@@ -607,8 +592,6 @@ export function addPaymentInterceptor(
       }
 
       const httpError = axiosErrorToHttpError(error);
-
-      // Extract raw x402 response (no pre-processing)
       const x402Response = extractX402Response(httpError);
       const resource = extractResourceFromError(httpError);
 
@@ -616,9 +599,6 @@ export function addPaymentInterceptor(
         return Promise.reject(error);
       }
 
-      // Mark the original request as being handled by payment flow
-      // This prevents the completion interceptor from firing on the original request
-      // when the retry succeeds. If payment fails, we'll clear this flag.
       (originalConfig as any).__sapiomPaymentHandling = true;
 
       const existingTransactionId =
@@ -646,8 +626,6 @@ export function addPaymentInterceptor(
                       url: originalConfig.url,
                       method: originalConfig.method,
                     },
-                    // Sanitized: 402 response headers may carry credentials
-                    // (e.g. set-cookie) that must not be sent to the Sapiom API.
                     responseHeaders: sanitizeHeaders(
                       error.response?.headers as
                         | Record<string, any>
@@ -659,7 +637,6 @@ export function addPaymentInterceptor(
               );
           }
         } catch (apiError) {
-          // Clear payment handling flag so completion interceptor fires
           (originalConfig as any).__sapiomPaymentHandling = false;
           if (config.failureMode === "closed") return Promise.reject(apiError);
           console.error(
@@ -681,8 +658,6 @@ export function addPaymentInterceptor(
                   url: originalConfig.url,
                   method: originalConfig.method,
                 },
-                // Sanitized: 402 response headers may carry credentials
-                // (e.g. set-cookie) that must not be sent to the Sapiom API.
                 responseHeaders: sanitizeHeaders(
                   error.response?.headers as Record<string, any> | undefined,
                 ),
@@ -701,7 +676,6 @@ export function addPaymentInterceptor(
             },
           });
         } catch (apiError) {
-          // Clear payment handling flag so completion interceptor fires
           (originalConfig as any).__sapiomPaymentHandling = false;
           if (config.failureMode === "closed") return Promise.reject(apiError);
           console.error(
@@ -716,9 +690,8 @@ export function addPaymentInterceptor(
         transaction.status === TransactionStatus.DENIED ||
         transaction.status === TransactionStatus.CANCELLED
       ) {
-        // Clear payment handling flag so completion interceptor fires
         (originalConfig as any).__sapiomPaymentHandling = false;
-        return Promise.reject(error); // Return original 402 error for completion
+        return Promise.reject(error);
       }
 
       if (transaction.status !== TransactionStatus.AUTHORIZED) {
@@ -726,7 +699,6 @@ export function addPaymentInterceptor(
         try {
           result = await poller.waitForAuthorization(transaction.id);
         } catch (pollError) {
-          // Clear payment handling flag so completion interceptor fires
           (originalConfig as any).__sapiomPaymentHandling = false;
           if (config.failureMode === "closed") return Promise.reject(pollError);
           console.error(
@@ -737,9 +709,8 @@ export function addPaymentInterceptor(
         }
 
         if (result.status !== "authorized") {
-          // Clear payment handling flag so completion interceptor fires
           (originalConfig as any).__sapiomPaymentHandling = false;
-          return Promise.reject(error); // Return original 402 error for completion
+          return Promise.reject(error);
         }
 
         transaction = result.transaction!;
@@ -748,12 +719,37 @@ export function addPaymentInterceptor(
       const authorizationPayload = transaction.payment?.authorizationPayload;
 
       if (!authorizationPayload) {
-        // Clear payment handling flag so the completion interceptor fires
         (originalConfig as any).__sapiomPaymentHandling = false;
         const payloadError = new Error(
           `Transaction ${transaction.id} is authorized but missing payment authorization payload`,
         );
-        // failureMode "open": surface the original 402 instead of a new error
+
+        // Terminal failure: completion interceptor already skipped the initial 402,
+        // so we must complete the transaction explicitly as error to avoid leaving it pending.
+        const startTime =
+          (originalConfig as any).__sapiomStartTime || Date.now();
+        const durationMs = Date.now() - startTime;
+        config.sapiomClient.transactions
+          .complete(transaction.id, {
+            outcome: "error",
+            responseFacts: {
+              source: "http-client",
+              version: "v1",
+              facts: {
+                errorType: "PaymentAuthorizationError",
+                errorMessage: payloadError.message,
+                httpStatus: 402,
+                httpStatusText: error.response?.statusText,
+                isNetworkError: false,
+                isTimeout: false,
+                elapsedMs: durationMs,
+              },
+            },
+          })
+          .catch((err) => {
+            console.error("[Sapiom] Failed to complete transaction:", err);
+          });
+
         if (config.failureMode === "closed") throw payloadError;
         console.error(
           "[Sapiom] Authorized transaction is missing payment authorization payload, returning 402:",
@@ -774,17 +770,14 @@ export function addPaymentInterceptor(
       const retryConfig = {
         ...originalConfig,
         __is402Retry: true,
-        __sapiomPaymentHandling: false, // Allow completion on retry
-        // If bodyFactory exists, call it for a fresh body
+        __sapiomPaymentHandling: false,
         ...(bodyFactory ? { data: bodyFactory() } : {}),
       } as any;
 
-      // Select header name based on x402 version (V1: X-PAYMENT, V2: PAYMENT-SIGNATURE)
       const headerName = getPaymentHeaderName(authorizationPayload);
       setHeader(retryConfig.headers, headerName, paymentHeaderValue);
 
       const response = await axiosInstance.request(retryConfig);
-
       return response;
     },
   );
@@ -793,16 +786,14 @@ export function addPaymentInterceptor(
 }
 
 /**
- * Completion interceptor configuration
+ * Completion interceptor configuration.
  */
 export interface CompletionInterceptorConfig {
   sapiomClient: SapiomClient;
 }
 
 /**
- * Add completion response interceptor to axios instance
- *
- * This interceptor fires-and-forgets a transaction completion after each request.
+ * Add completion response interceptor to axios instance.
  */
 export function addCompletionInterceptor(
   axiosInstance: AxiosInstance,
@@ -812,8 +803,6 @@ export function addCompletionInterceptor(
     (response: AxiosResponse) => {
       const axiosConfig = response.config as InternalAxiosRequestConfig;
 
-      // Skip if this is the original request that triggered payment flow
-      // The retry request will handle completion instead
       if ((axiosConfig as any).__sapiomPaymentHandling) {
         return response;
       }
@@ -838,7 +827,6 @@ export function addCompletionInterceptor(
           durationMs,
         };
 
-        // Fire-and-forget
         config.sapiomClient.transactions
           .complete(transactionId, {
             outcome: "success",
@@ -858,14 +846,10 @@ export function addCompletionInterceptor(
     async (error: AxiosError) => {
       const originalConfig = error.config as InternalAxiosRequestConfig;
 
-      // Skip 402 errors - they will be handled by the payment interceptor
-      // which may retry the request. Completion will happen on the retry result.
       if (error.response?.status === 402) {
         return Promise.reject(error);
       }
 
-      // Skip if this is the original request that triggered payment flow
-      // The retry request will handle completion instead
       if ((originalConfig as any)?.__sapiomPaymentHandling) {
         return Promise.reject(error);
       }
@@ -891,7 +875,6 @@ export function addCompletionInterceptor(
           elapsedMs: durationMs,
         };
 
-        // Fire-and-forget
         config.sapiomClient.transactions
           .complete(transactionId, {
             outcome: "error",
