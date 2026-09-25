@@ -13,7 +13,7 @@ import {
 import type { FailureMode, TransactionPollingConfig } from "@sapiom/core";
 
 /**
- * Authorization configuration for fetch interceptor.
+ * Authorization configuration for the fetch interceptor.
  */
 export interface AuthorizationConfig {
   sapiomClient: SapiomClient;
@@ -22,7 +22,7 @@ export interface AuthorizationConfig {
 }
 
 /**
- * Payment configuration for fetch interceptor.
+ * Payment configuration for the fetch interceptor.
  */
 export interface PaymentConfig {
   sapiomClient: SapiomClient;
@@ -69,7 +69,7 @@ export class AuthorizationTimeoutError extends Error {
 }
 
 /**
- * Case-insensitively retrieves a header value from Headers instance.
+ * Case-insensitively retrieves a header value from a Headers instance.
  */
 function getHeader(headers: Headers, name: string): string | undefined {
   const lowerName = name.toLowerCase();
@@ -82,7 +82,7 @@ function getHeader(headers: Headers, name: string): string | undefined {
 }
 
 /**
- * Case-insensitively sets or overwrites a header in Headers instance.
+ * Case-insensitively sets or overwrites a header in a Headers instance.
  */
 function setHeader(headers: Headers, name: string, value: string): void {
   const lowerName = name.toLowerCase();
@@ -97,7 +97,7 @@ function setHeader(headers: Headers, name: string, value: string): void {
 }
 
 /**
- * Get the correct payment header name based on x402 version.
+ * Resolves the appropriate payment header name based on the x402 specification version.
  * V1: X-PAYMENT, V2: PAYMENT-SIGNATURE
  */
 function getPaymentHeaderName(payload: any): string {
@@ -108,10 +108,8 @@ function getPaymentHeaderName(payload: any): string {
 }
 
 /**
- * Header names that must never be sent to the Sapiom backend in telemetry
- * or transaction metadata: they can carry credentials or session material.
- * Substring matching (case-insensitive) covers variants such as
- * "sapiom-identity", "proxy-authorization", "x-goog-api-key" or "set-cookie".
+ * Identifies header names that must never be forwarded in telemetry or metadata.
+ * Covers credential/session keywords and raw payment proof headers.
  */
 function isSensitiveHeaderName(name: string): boolean {
   const lower = name.toLowerCase();
@@ -120,12 +118,14 @@ function isSensitiveHeaderName(name: string): boolean {
     lower.includes("auth") ||
     lower.includes("key") ||
     lower.includes("token") ||
-    lower.includes("cookie")
+    lower.includes("cookie") ||
+    lower === "x-payment" ||
+    lower === "payment-signature"
   );
 }
 
 /**
- * Copy a header collection into a plain object, dropping sensitive headers.
+ * Copies a header collection into a plain key-value object, redacting sensitive headers.
  */
 function sanitizeHeaders(
   headers: Iterable<[string, string]>,
@@ -140,8 +140,7 @@ function sanitizeHeaders(
 }
 
 /**
- * Base64-encode a UTF-8 string safely across Node and browser runtimes.
- * `btoa` only accepts Latin-1 input, so encode through UTF-8 bytes first.
+ * Encodes a UTF-8 string into standard Base64 representation across browser and Node runtimes.
  */
 function base64EncodeUtf8(text: string): string {
   if (typeof Buffer !== "undefined") {
@@ -550,14 +549,14 @@ export async function handlePayment(
 }
 
 /**
- * Completion configuration for fetch interceptor.
+ * Completion configuration for the fetch interceptor.
  */
 export interface CompletionConfig {
   sapiomClient: SapiomClient;
 }
 
 /**
- * Handle transaction completion after request finishes (fire-and-forget).
+ * Handles transaction completion after request finishes (fire-and-forget).
  */
 export function handleCompletion(
   request: Request,
