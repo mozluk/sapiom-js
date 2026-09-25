@@ -17,7 +17,7 @@ import {
 import type { TransactionPollingConfig } from "@sapiom/core";
 
 /**
- * Authorization configuration for node-http.
+ * Authorization configuration for the node-http interceptor.
  */
 export interface AuthorizationConfig {
   sapiomClient: SapiomClient;
@@ -26,7 +26,7 @@ export interface AuthorizationConfig {
 }
 
 /**
- * Payment configuration for node-http.
+ * Payment configuration for the node-http interceptor.
  */
 export interface PaymentConfig {
   sapiomClient: SapiomClient;
@@ -105,7 +105,7 @@ function setHeader(
 }
 
 /**
- * Get the correct payment header name based on x402 version.
+ * Resolves the appropriate payment header name based on the x402 specification version.
  * V1: X-PAYMENT, V2: PAYMENT-SIGNATURE
  */
 function getPaymentHeaderName(payload: any): string {
@@ -116,10 +116,8 @@ function getPaymentHeaderName(payload: any): string {
 }
 
 /**
- * Header names that must never be sent to the Sapiom backend in telemetry
- * or transaction metadata: they can carry credentials or session material.
- * Substring matching (case-insensitive) covers variants such as
- * "sapiom-identity", "proxy-authorization", "x-goog-api-key" or "set-cookie".
+ * Identifies header names that must never be forwarded in telemetry or metadata.
+ * Covers credential/session keywords and raw payment proof headers.
  */
 function isSensitiveHeaderName(name: string): boolean {
   const lower = name.toLowerCase();
@@ -128,12 +126,14 @@ function isSensitiveHeaderName(name: string): boolean {
     lower.includes("auth") ||
     lower.includes("key") ||
     lower.includes("token") ||
-    lower.includes("cookie")
+    lower.includes("cookie") ||
+    lower === "x-payment" ||
+    lower === "payment-signature"
   );
 }
 
 /**
- * Copy a headers object into a plain object, dropping sensitive headers.
+ * Copies a headers object into a plain record, dropping sensitive headers.
  */
 function sanitizeHeaders(
   headers: Record<string, any> | undefined,
@@ -149,7 +149,7 @@ function sanitizeHeaders(
 }
 
 /**
- * Handle pre-flight authorization for node-http requests.
+ * Handles pre-flight authorization for node-http requests.
  */
 export async function handleAuthorization(
   request: HttpRequest,
@@ -343,7 +343,7 @@ export async function handleAuthorization(
 }
 
 /**
- * Handle payment errors (402 responses) for node-http.
+ * Handles 402 payment requirements for node-http requests.
  */
 export async function handlePayment(
   originalRequest: HttpRequest,
@@ -456,14 +456,14 @@ export async function handlePayment(
 }
 
 /**
- * Completion configuration for node-http.
+ * Completion configuration for the node-http interceptor.
  */
 export interface CompletionConfig {
   sapiomClient: SapiomClient;
 }
 
 /**
- * Handle transaction completion after request finishes (fire-and-forget).
+ * Handles transaction completion after request finishes (fire-and-forget).
  */
 export function handleCompletion<T>(
   request: HttpRequest,
