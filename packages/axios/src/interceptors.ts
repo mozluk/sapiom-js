@@ -111,7 +111,7 @@ function setHeader(
 }
 
 /**
- * Get the correct payment header name based on x402 version.
+ * Resolves the appropriate payment header name based on the x402 specification version.
  * V1: X-PAYMENT, V2: PAYMENT-SIGNATURE
  */
 function getPaymentHeaderName(payload: any): string {
@@ -122,10 +122,8 @@ function getPaymentHeaderName(payload: any): string {
 }
 
 /**
- * Header names that must never be sent to the Sapiom backend in telemetry
- * or transaction metadata: they can carry credentials or session material.
- * Substring matching (case-insensitive) covers variants such as
- * "sapiom-identity", "proxy-authorization", "x-goog-api-key" or "set-cookie".
+ * Identifies header names that must never be forwarded in telemetry or metadata.
+ * Covers credential/session keywords and raw payment proof headers.
  */
 function isSensitiveHeaderName(name: string): boolean {
   const lower = name.toLowerCase();
@@ -134,12 +132,14 @@ function isSensitiveHeaderName(name: string): boolean {
     lower.includes("auth") ||
     lower.includes("key") ||
     lower.includes("token") ||
-    lower.includes("cookie")
+    lower.includes("cookie") ||
+    lower === "x-payment" ||
+    lower === "payment-signature"
   );
 }
 
 /**
- * Copy a headers object into a plain object, dropping sensitive headers.
+ * Copies a headers object into a plain record, dropping sensitive headers.
  */
 function sanitizeHeaders(
   headers: Record<string, any> | undefined,
@@ -155,7 +155,7 @@ function sanitizeHeaders(
 }
 
 /**
- * Reads a stream into a Buffer for replayability.
+ * Reads an asynchronous or event-based stream into a single Buffer for request replayability.
  */
 async function streamToBuffer(stream: any): Promise<Buffer> {
   if (typeof stream[Symbol.asyncIterator] === "function") {
@@ -187,7 +187,7 @@ interface ReplayableBodyResult {
 }
 
 /**
- * Converts the request body to a form that can be replayed on 402 retry.
+ * Converts a request body into an immutable or replayable form for 402 payment retries.
  */
 async function ensureReplayableBody(
   config: InternalAxiosRequestConfig,
@@ -208,12 +208,12 @@ async function ensureReplayableBody(
 
   if (data instanceof ArrayBuffer) {
     const buf = Buffer.from(data);
-    return { data, bodySizeBytes: buf.length };
+    return { data: buf, bodySizeBytes: buf.length };
   }
 
   if (ArrayBuffer.isView(data) && !(data instanceof DataView)) {
     const buf = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
-    return { data, bodySizeBytes: data.byteLength };
+    return { data: buf, bodySizeBytes: data.byteLength };
   }
 
   if (
@@ -262,7 +262,7 @@ async function ensureReplayableBody(
 }
 
 /**
- * Add authorization request interceptor to axios instance.
+ * Attaches the preemptive authorization request interceptor to an Axios instance.
  */
 export function addAuthorizationInterceptor(
   axiosInstance: AxiosInstance,
@@ -561,7 +561,7 @@ function axiosErrorToHttpError(error: AxiosError): HttpError {
 }
 
 /**
- * Add payment response interceptor to axios instance.
+ * Attaches the 402 payment retry interceptor to an Axios instance.
  */
 export function addPaymentInterceptor(
   axiosInstance: AxiosInstance,
@@ -786,14 +786,14 @@ export function addPaymentInterceptor(
 }
 
 /**
- * Completion interceptor configuration.
+ * Completion interceptor configuration for Axios.
  */
 export interface CompletionInterceptorConfig {
   sapiomClient: SapiomClient;
 }
 
 /**
- * Add completion response interceptor to axios instance.
+ * Attaches the transaction completion observer to an Axios instance.
  */
 export function addCompletionInterceptor(
   axiosInstance: AxiosInstance,
